@@ -1,0 +1,91 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# INTENTIONAL FAILURE SCENARIO — for live demo debugging section
+#
+# This file has a BAD environment variable:
+#   REDIS_HOST is set to "redis-broken-host" (wrong service name)
+#
+# What will happen:
+#   1. Pods start and pass liveness probe (/health returns 200 — no Redis needed)
+#   2. Readiness probe hits /ready which tries to ping Redis — FAILS
+#   3. Pod stays in 0/1 READY state forever
+#   4. No traffic is routed to the broken pods
+#   5. kubectl get pods shows: READY 0/2
+#
+# How to trigger:
+#   kubectl apply -f k8s/BROKEN-app.yaml
+#
+# How to debug (live demo script):
+#   kubectl get pods -n fluidai                          # see 0/2 READY
+#   kubectl describe pod <pod-name> -n fluidai           # see probe failures
+#   kubectl logs <pod-name> -n fluidai                   # see Redis conn errors
+#   kubectl get events -n fluidai --sort-by='.lastTimestamp'   # see Warning
+#
+# Root cause found → fix:
+#   kubectl set env deployment/fastapi-app REDIS_HOST=redis-service -n fluidai
+#   # OR: kubectl apply -f k8s/03-app.yaml (correct manifest)
+# ══════════════════════════════════════════════════════════════════════════════
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-app
+  namespace: fluidai
+  labels:
+    app: fastapi-app
+  annotations:
+    kubernetes.io/change-cause: "BROKEN — wrong redis host (for demo)"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: fastapi-app
+  template:
+    metadata:
+      labels:
+        app: fastapi-app
+    spec:
+      containers:
+        - name: fastapi-app
+          image: mjai3747/fluidai-demo:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: REDIS_HOST
+              value: "redis-broken-host"          # ← INTENTIONAL BUG: wrong DNS name
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_PORT
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3

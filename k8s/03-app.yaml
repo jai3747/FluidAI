@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-app
+  namespace: fluidai
+  labels:
+    app: fastapi-app
+  annotations:
+    # Rollback annotation — kubectl rollout undo deployment/fastapi-app -n fluidai
+    kubernetes.io/change-cause: "initial deployment"
+spec:
+  replicas: 2
+  # Rolling update strategy — zero-downtime deploys
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # spin up 1 extra pod before killing old ones
+      maxUnavailable: 0  # never take a pod down until a new one is ready
+  selector:
+    matchLabels:
+      app: fastapi-app
+  template:
+    metadata:
+      labels:
+        app: fastapi-app
+    spec:
+      containers:
+        - name: fastapi-app
+          # latest is replaced by CI/CD pipeline (sed or envsubst)
+          image: mjai3747/fluidai-demo:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+
+          # Pull config from ConfigMap and Secret
+          env:
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_HOST
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_PORT
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+
+          # ── RELIABILITY FEATURE: Readiness + Liveness Probes ─────────────
+          #
+          # WHY: Without probes, Kubernetes sends traffic to pods that are
+          #      starting up or broken, causing 502/503 errors to real users.
+          #
+          # Liveness probe  → "Is the process still alive?"
+          #   Checks /health (no external deps). Restarts the container if it
+          #   stops responding — catches deadlocks, infinite loops, OOM.
+          #
+          # Readiness probe → "Is this pod ready to serve traffic?"
+          #   Checks /ready (pings Redis). Pod is removed from Service load
+          #   balancer if Redis is down — stops bad traffic routing.
+          #
+          # TRADEOFF: Misconfigured probes can cause thrashing restart loops.
+          #   Too-tight thresholds = false positives during slow starts.
+          #   Always tune initialDelaySeconds to your real startup time.
+          # ─────────────────────────────────────────────────────────────────
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15   # give uvicorn time to start
+            periodSeconds: 10
+            failureThreshold: 3       # 3 failures = restart container
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3       # 3 failures = remove from load balancer
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-service
+  namespace: fluidai
+spec:
+  selector:
+    app: fastapi-app
+  ports:
+    - port: 80
+      targetPort: 8000
+  # NodePort so we can reach it from outside Minikube
+  type: NodePort
